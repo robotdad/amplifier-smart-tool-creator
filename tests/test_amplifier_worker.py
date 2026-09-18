@@ -182,3 +182,40 @@ async def test_workspace_permissions_and_escape(tmp_path: Path) -> None:
     assert (await writable[1].execute({"path": "new.txt", "content": "written"})).success
     assert (root / "new.txt").read_text() == "written"
     assert not (await writable[1].execute({"path": "../escape", "content": "no"})).success
+
+
+@pytest.mark.parametrize("offset", [1_999_993, 2_000_000, 2_030_000, 2_100_000])
+async def test_workspace_read_pages_unicode_files_beyond_two_million_characters(
+    tmp_path: Path, offset: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = "\u00e9" * 2_000_000 + "TAIL_MARKER" + "\u7d42" * 60_000
+    source = tmp_path / "large.txt"
+    source.write_text(text, encoding="utf-8")
+    original_open = Path.open
+    reads: list[int] = []
+
+    class BoundedReader:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            self.handle.close()
+
+        def read(self, size: int = -1) -> str:
+            reads.append(size)
+            assert 0 < size <= 50_000, "Paging must not buffer the whole prefix or file."
+            return self.handle.read(size)
+
+    def tracked_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = original_open(path, *args, **kwargs)
+        return BoundedReader(handle) if path == source else handle
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    request = AgentRequest(prompt="Test", model="scripted", timeout_seconds=5, workspace=HostWorkspace(path=tmp_path))
+    result = await workspace_tools(request)[0].execute({"path": "large.txt", "offset": offset})
+    assert result.success, result.error
+    assert result.output == text[offset : offset + 50_000]
+    assert reads

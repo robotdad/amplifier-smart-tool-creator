@@ -51,7 +51,13 @@ def workspace_tools(request: AgentRequest) -> list[AgentTool]:
             return "\n".join(sorted(f"{p.name}/" if p.is_dir() else p.name for p in target.iterdir()))
         offset = max(0, int(values.get("offset", 0)))
         with target.open(encoding="utf-8") as handle:
-            return handle.read(2_000_000)[offset : offset + 50_000]
+            # Text offsets count characters, so a byte seek would split UTF-8.
+            while offset:
+                skipped = handle.read(min(offset, 50_000))
+                if not skipped:
+                    return ""
+                offset -= len(skipped)
+            return handle.read(50_000)
 
     async def write(values: dict[str, Any]) -> str:
         target = resolve(values["path"])
